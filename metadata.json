@@ -1,0 +1,6 @@
+{
+  "name": "ForgeFlow — Production Process & Material Tracking",
+  "description": "Batch-level raw material tracking, ledger-based stock inventory, configurable production stages, role-based access control, and audit reporting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
