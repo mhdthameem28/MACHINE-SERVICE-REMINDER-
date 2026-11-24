@@ -28,6 +28,12 @@ import {
 import { hashPassword, signSessionToken, verifyPassword } from './src/lib/security.ts';
 import { type AuthRequest, requireAuth, requireRole } from './src/middleware/auth.ts';
 import {
+  checkLoginRateLimit,
+  extractClientIp,
+  recordFailedLoginAttempt,
+  recordSuccessfulLogin,
+} from './src/middleware/rateLimit.ts';
+import {
   adjustStock,
   advanceBatch,
   bulkImportMaterialsWithOpeningStock,
@@ -53,7 +59,51 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
+const BASE_CSP_DIRECTIVES = [
+  "default-src 'self'",
+  "script-src 'self' https://apis.google.com https://www.gstatic.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com data:",
+  "img-src 'self' data: blob: https://lh3.googleusercontent.com https://www.gstatic.com",
+  "connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://apis.google.com",
+  "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+];
+
+const APP_CSP = [
+  ...BASE_CSP_DIRECTIVES,
+  "frame-ancestors 'self' https://aistudio.google.com https://*.google.com https://*.googleusercontent.com https://*.usercontent.goog",
+].join('; ');
+
+const API_CSP = [...BASE_CSP_DIRECTIVES, "frame-ancestors 'none'"].join('; ');
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  if (req.path.startsWith('/api')) {
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', API_CSP);
+  } else {
+    res.setHeader('Content-Security-Policy', APP_CSP);
+  }
+  next();
+});
+
 app.use(express.json({ limit: '1mb' }));
+
+app.get('/.well-known/security.txt', (_req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.send(
+    'Contact: mailto:mhdthameem28work@gmail.com\nExpires: 2027-11-24T00:00:00.000Z\nPreferred-Languages: en\n'
+  );
+});
 
 // Block unknown/non-standard HTTP error leakage
 function handleRouteError(res: Response, err: unknown, fallbackMessage: string) {
@@ -177,8 +227,19 @@ app.post('/api/auth/setup-admin', async (req: Request, res: Response) => {
 
 app.post('/api/auth/login', async (req: Request, res: Response) => {
   try {
+    const clientIp = extractClientIp(req);
     const email = String(req.body?.email ?? '').trim().toLowerCase();
     const password = String(req.body?.password ?? '');
+
+    const rateCheck = checkLoginRateLimit(clientIp, email);
+    if (!rateCheck.allowed) {
+      res.setHeader('Retry-After', String(rateCheck.retryAfterSeconds));
+      return res.status(429).json({
+        error: 'Too many failed login attempts. Please try again in 15 minutes.',
+        retryAfterSeconds: rateCheck.retryAfterSeconds,
+      });
+    }
+
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
@@ -191,6 +252,10 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     const user = rows[0];
 
     if (!user || !user.passwordHash || !verifyPassword(password, user.passwordHash)) {
+      const outcome = recordFailedLoginAttempt(clientIp, email);
+      if (outcome.blocked) {
+        res.setHeader('Retry-After', String(outcome.retryAfterSeconds));
+      }
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
@@ -199,6 +264,8 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
         error: 'Your account has been deactivated. Contact an Administrator.',
       });
     }
+
+    recordSuccessfulLogin(clientIp, email);
 
     const token = signSessionToken(user.id, user.email);
     res.json({
