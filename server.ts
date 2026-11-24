@@ -30,6 +30,7 @@ import { type AuthRequest, requireAuth, requireRole } from './src/middleware/aut
 import {
   checkLoginRateLimit,
   extractClientIp,
+  loginRateLimiter,
   recordFailedLoginAttempt,
   recordSuccessfulLogin,
 } from './src/middleware/rateLimit.ts';
@@ -75,26 +76,29 @@ const BASE_CSP_DIRECTIVES = [
   "form-action 'self'",
 ];
 
-const APP_CSP = [
+const STRICT_CSP = [...BASE_CSP_DIRECTIVES, "frame-ancestors 'none'"].join('; ');
+const PREVIEW_CSP = [
   ...BASE_CSP_DIRECTIVES,
   "frame-ancestors 'self' https://aistudio.google.com https://*.google.com https://*.googleusercontent.com https://*.usercontent.goog",
 ].join('; ');
 
-const API_CSP = [...BASE_CSP_DIRECTIVES, "frame-ancestors 'none'"].join('; ');
-
 app.use((req: Request, res: Response, next: NextFunction) => {
+  const isProd = process.env.NODE_ENV === 'production';
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  if (req.path.startsWith('/api')) {
+
+  if (isProd || req.path.startsWith('/api')) {
     res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Content-Security-Policy', API_CSP);
+    res.setHeader('Content-Security-Policy', STRICT_CSP);
   } else {
-    res.setHeader('Content-Security-Policy', APP_CSP);
+    res.setHeader('Content-Security-Policy', PREVIEW_CSP);
   }
   next();
 });
 
+app.use('/api/auth/login', loginRateLimiter);
+app.use('/api/auth/setup-admin', loginRateLimiter);
 app.use(express.json({ limit: '1mb' }));
 
 app.get('/.well-known/security.txt', (_req: Request, res: Response) => {

@@ -1,9 +1,34 @@
 import type { Request } from 'express';
+import rateLimit from 'express-rate-limit';
 
 const MAX_CONSECUTIVE_FAILURES = 5;
 const BLOCK_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 const FAILURE_RESET_WINDOW_MS = 15 * 60 * 1000;
 const MAX_TRACKED_KEYS = 10_000;
+
+/**
+ * Strict IP-based rate limiter middleware for authentication endpoints.
+ * Blocks any IP after 5 failed attempts within a 15-minute window.
+ */
+export const loginRateLimiter = rateLimit({
+  windowMs: BLOCK_DURATION_MS,
+  limit: MAX_CONSECUTIVE_FAILURES,
+  standardHeaders: true,
+  legacyHeaders: true,
+  skipSuccessfulRequests: true,
+  validate: {
+    trustProxy: false,
+    xForwardedForHeader: false,
+    forwardedHeader: false,
+  },
+  handler: (_req, res) => {
+    res.setHeader('Retry-After', String(Math.ceil(BLOCK_DURATION_MS / 1000)));
+    return res.status(429).json({
+      error: 'Too many failed login attempts. Please try again in 15 minutes.',
+      retryAfterSeconds: Math.ceil(BLOCK_DURATION_MS / 1000),
+    });
+  },
+});
 
 interface AttemptRecord {
   consecutiveFailures: number;
@@ -23,7 +48,6 @@ function pruneExpired(now: number) {
       attemptStore.delete(key);
     }
   }
-  // Hard cap to avoid unbounded memory growth under spray attacks
   while (attemptStore.size > MAX_TRACKED_KEYS) {
     const oldestKey = attemptStore.keys().next().value;
     if (!oldestKey) break;
@@ -56,10 +80,8 @@ export function checkLoginRateLimit(
   for (const key of buildKeys(ip, email)) {
     const record = attemptStore.get(key);
     if (!record) continue;
-    if (record.blockedUntil > now) {
-      if (record.blockedUntil > maxBlockedUntil) {
-        maxBlockedUntil = record.blockedUntil;
-      }
+    if (record.blockedUntil > now && record.blockedUntil > maxBlockedUntil) {
+      maxBlockedUntil = record.blockedUntil;
     }
   }
 
