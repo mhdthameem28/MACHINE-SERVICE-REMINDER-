@@ -124,27 +124,27 @@ export const StockAdjustmentPage: React.FC = () => {
   };
 
   if (loading) {
-    return <div className="h-80 bg-white border border-slate-200 rounded-lg animate-pulse" />;
+    return <div className="h-80 bg-white border border-slate-200 rounded-2xl shadow-sm animate-pulse" />;
   }
 
   return (
     <div className="max-w-3xl space-y-6">
       <div>
-        <h2 className="text-lg font-semibold text-slate-900">Stock Adjustment</h2>
-        <p className="text-xs text-slate-500 mt-0.5">
+        <h1 className="text-2xl font-bold tracking-tight text-slate-900">Stock Adjustment</h1>
+        <p className="text-sm text-slate-500 mt-1">
           Record positive or negative ledger corrections with an audited reason.
         </p>
       </div>
 
       {successMsg && (
-        <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center gap-2 text-xs font-medium text-emerald-900">
+        <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center gap-2 text-xs font-medium text-emerald-900">
           <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
           <span>{successMsg}</span>
         </div>
       )}
 
       {error && (
-        <div className="p-3 rounded-md bg-red-50 border border-red-200 flex items-start gap-2 text-xs text-red-800">
+        <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 flex items-start gap-2 text-xs text-red-800">
           <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
           <span>{error}</span>
         </div>
@@ -152,17 +152,17 @@ export const StockAdjustmentPage: React.FC = () => {
 
       <form
         onSubmit={handleSubmit}
-        className="bg-white border border-slate-200 rounded-lg p-6 space-y-5"
+        className="bg-white border border-slate-200 rounded-2xl shadow-sm p-6 sm:p-8 space-y-5"
       >
         <div>
-          <label className="block text-xs font-medium text-slate-700 mb-1.5">
+          <label className="block text-xs font-medium text-slate-600 mb-1.5">
             Material
           </label>
           <select
             value={materialId}
             onChange={(e) => setMaterialId(e.target.value)}
             required
-            className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900/15 focus:border-slate-400"
+            className="w-full px-3.5 py-2.5 text-sm font-normal bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors"
           >
             {materials.map((m) => (
               <option key={m.id} value={m.id}>
@@ -174,14 +174,14 @@ export const StockAdjustmentPage: React.FC = () => {
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1.5">
+            <label className="block text-xs font-medium text-slate-600 mb-1.5">
               Direction
             </label>
-            <div className="flex p-1 bg-slate-100 rounded-md">
+            <div className="flex p-1 bg-slate-100 rounded-lg">
               <button
                 type="button"
                 onClick={() => setDirection('decrease')}
-                className={`flex-1 py-1.5 text-xs font-medium rounded transition-colors ${
+                className={`flex-1 py-2 text-xs font-medium rounded-md transition-colors ${
                   direction === 'decrease'
                     ? 'bg-white text-slate-900 shadow-sm'
                     : 'text-slate-600 hover:text-slate-900'
@@ -192,7 +192,7 @@ export const StockAdjustmentPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setDirection('increase')}
-                className={`flex-1 py-1.5 text-xs font-medium rounded transition-colors ${
+                className={`flex-1 py-2 text-xs font-medium rounded-md transition-colors ${
                   direction === 'increase'
                     ? 'bg-white text-slate-900 shadow-sm'
                     : 'text-slate-600 hover:text-slate-900'
@@ -204,7 +204,7 @@ export const StockAdjustmentPage: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1.5">
+            <label className="block text-xs font-medium text-slate-600 mb-1.5">
               Quantity {selectedMaterial ? `(${selectedMaterial.unit})` : ''}
             </label>
             <input
@@ -215,12 +215,12 @@ export const StockAdjustmentPage: React.FC = () => {
               onChange={(e) => setAmount(e.target.value)}
               placeholder="0.00"
               required
-              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900/15 focus:border-slate-400"
+              className="w-full px-3.5 py-2.5 text-sm font-normal tabular-nums bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1.5">
+            <label className="block text-xs font-medium text-slate-600 mb-1.5">
               Adjustment Date
             </label>
             <input
@@ -228,13 +228,13 @@ export const StockAdjustmentPage: React.FC = () => {
               value={movementDate}
               onChange={(e) => setMovementDate(e.target.value)}
               required
-              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900/15 focus:border-slate-400"
+              className="w-full px-3.5 py-2.5 text-sm font-normal tabular-nums bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors"
             />
           </div>
         </div>
 
         {selectedMaterial && (
-          <div className="p-3 bg-slate-50 border border-slate-200 rounded-md flex flex-wrap items-center justify-between gap-4 text-xs font-mono tabular-nums">
+          <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex flex-wrap items-center justify-between gap-4 text-xs font-mono tabular-nums">
             <span className="text-slate-600">
               Current Stock: {formatWithUnit(selectedMaterial.currentStock, selectedMaterial.unit)}
             </span>
@@ -253,13 +253,13 @@ export const StockAdjustmentPage: React.FC = () => {
         )}
 
         <div>
-          <label className="block text-xs font-medium text-slate-700 mb-1.5">
+          <label className="block text-xs font-medium text-slate-600 mb-1.5">
             Reason
           </label>
           <select
             value={reason}
             onChange={(e) => setReason(e.target.value)}
-            className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900/15 focus:border-slate-400"
+            className="w-full px-3.5 py-2.5 text-sm font-normal bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors"
           >
             {ADJUSTMENT_REASONS.map((r) => (
               <option key={r} value={r}>
@@ -271,7 +271,7 @@ export const StockAdjustmentPage: React.FC = () => {
 
         {reason === 'Other' && (
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1.5">
+            <label className="block text-xs font-medium text-slate-600 mb-1.5">
               Specify Reason
             </label>
             <input
@@ -280,13 +280,13 @@ export const StockAdjustmentPage: React.FC = () => {
               onChange={(e) => setCustomReason(e.target.value)}
               required
               placeholder="Enter adjustment reason"
-              className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900/15 focus:border-slate-400"
+              className="w-full px-3.5 py-2.5 text-sm font-normal bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors"
             />
           </div>
         )}
 
         <div>
-          <label className="block text-xs font-medium text-slate-700 mb-1.5">
+          <label className="block text-xs font-medium text-slate-600 mb-1.5">
             Notes (optional)
           </label>
           <textarea
@@ -294,15 +294,15 @@ export const StockAdjustmentPage: React.FC = () => {
             value={note}
             onChange={(e) => setNote(e.target.value)}
             placeholder="Audit count sheet reference, damage details, etc."
-            className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900/15 focus:border-slate-400"
+            className="w-full px-3.5 py-2.5 text-sm font-normal bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors"
           />
         </div>
 
-        <div className="pt-2 flex items-center justify-end">
+        <div className="pt-2 flex justify-end">
           <button
             type="submit"
             disabled={submitting || !selectedMaterial}
-            className="px-5 py-2.5 text-sm font-medium text-white bg-slate-900 rounded-md hover:bg-slate-800 disabled:opacity-50 transition-colors whitespace-nowrap"
+            className="px-5 py-2.5 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-sm disabled:opacity-50 transition-colors whitespace-nowrap"
           >
             {submitting ? 'Saving Adjustment...' : 'Record Adjustment'}
           </button>

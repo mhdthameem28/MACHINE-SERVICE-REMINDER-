@@ -11,20 +11,36 @@ import {
   emailRecipients,
   materials,
   notifications,
+  parts,
+  partStockMovements,
+  scrapLogs,
   stages,
   stockMovements,
   users,
 } from './src/db/schema.ts';
 import { ALL_ROLES, type UserRole } from './src/lib/roles.ts';
+import {
+  isValidMaterialUnit,
+  MATERIAL_UNITS,
+  normalizeMaterialUnit,
+  normalizeReceiveUnit,
+} from './src/lib/units.ts';
 import { hashPassword, signSessionToken, verifyPassword } from './src/lib/security.ts';
 import { type AuthRequest, requireAuth, requireRole } from './src/middleware/auth.ts';
 import {
   adjustStock,
   advanceBatch,
+  bulkImportMaterialsWithOpeningStock,
+  bulkImportPartsWithOpeningStock,
+  bulkUpdateStockFromUpload,
   DomainError,
+  evaluatePartReorderAlert,
   getAllMaterialsWithStock,
+  getAllPartsWithStock,
+  getKnownPartNames,
   receiveStock,
 } from './src/services/production.ts';
+import { sendAlertEmail } from './src/services/mailer.ts';
 import {
   type ReportFilters,
   type ReportType,
@@ -211,21 +227,26 @@ app.get('/api/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
 
 app.get('/api/dashboard', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const materialList = await getAllMaterialsWithStock(false);
-    const activeStages = await db
-      .select()
-      .from(stages)
-      .where(eq(stages.active, true))
-      .orderBy(asc(stages.sequence), asc(stages.id));
+    const [materialList, partList, activeStages] = await Promise.all([
+      getAllMaterialsWithStock(false),
+      getAllPartsWithStock(false),
+      db
+        .select()
+        .from(stages)
+        .where(eq(stages.active, true))
+        .orderBy(asc(stages.sequence), asc(stages.id)),
+    ]);
 
     const recentBatches = await db
       .select({
         id: batches.id,
         quantity: batches.quantity,
+        partName: batches.partName,
+        piecesQuantity: batches.piecesQuantity,
         createdAt: batches.createdAt,
         materialCode: materials.code,
         materialName: materials.name,
-        materialUnit: materials.unit,
+        materialUnit: sql<string>`COALESCE(${batches.unit}, ${materials.unit})`,
         stageName: stages.name,
         stageSequence: stages.sequence,
         createdByName: users.name,
@@ -243,12 +264,146 @@ app.get('/api/dashboard', requireAuth, async (req: AuthRequest, res: Response) =
         stageName: stages.name,
         sequence: stages.sequence,
         batchCount: sql<number>`COUNT(${batches.id})::int`,
+        totalPieces: sql<number>`COALESCE(SUM(${batches.piecesQuantity}), 0)::int`,
+        totalRawQuantity: sql<number>`COALESCE(SUM(${batches.quantity}), 0)::double precision`,
       })
       .from(stages)
       .leftJoin(batches, eq(batches.currentStageId, stages.id))
       .where(eq(stages.active, true))
       .groupBy(stages.id, stages.name, stages.sequence)
       .orderBy(asc(stages.sequence));
+
+    const stageUnitRows = await db
+      .select({
+        stageId: batches.currentStageId,
+        unit: sql<string>`COALESCE(${batches.unit}, ${materials.unit})`,
+        total: sql<number>`COALESCE(SUM(${batches.quantity}), 0)::double precision`,
+      })
+      .from(batches)
+      .innerJoin(materials, eq(batches.materialId, materials.id))
+      .groupBy(batches.currentStageId, sql`COALESCE(${batches.unit}, ${materials.unit})`);
+
+    const stageUnitsMap = new Map<number, { unit: string; total: number }[]>();
+    for (const row of stageUnitRows) {
+      const list = stageUnitsMap.get(row.stageId) ?? [];
+      list.push({ unit: row.unit, total: Number(row.total.toFixed(4)) });
+      stageUnitsMap.set(row.stageId, list);
+    }
+
+    const enrichedStageDistribution = stageDistribution.map((st) => ({
+      ...st,
+      totalRawQuantity: Number((st.totalRawQuantity ?? 0).toFixed(4)),
+      unitTotals: stageUnitsMap.get(st.stageId) ?? [],
+    }));
+
+    // Executive KPI aggregates
+    const [batchAggregateRows, scrapTotalRows, rejectionsByStageRows, topCutPartsRows] =
+      await Promise.all([
+        db
+          .select({
+            batchesCreated: sql<number>`COUNT(${batches.id})::int`,
+            completedBatches: sql<number>`COALESCE(SUM(CASE WHEN ${stages.sequence} >= 4 THEN 1 ELSE 0 END), 0)::int`,
+            inProcessBatches: sql<number>`COALESCE(SUM(CASE WHEN ${stages.sequence} < 4 THEN 1 ELSE 0 END), 0)::int`,
+          })
+          .from(batches)
+          .innerJoin(stages, eq(batches.currentStageId, stages.id)),
+        db
+          .select({
+            totalRejectedPieces: sql<number>`COALESCE(SUM(${scrapLogs.quantityRejected}), 0)::int`,
+          })
+          .from(scrapLogs),
+        db
+          .select({
+            stageId: stages.id,
+            stageName: stages.name,
+            sequence: stages.sequence,
+            rejectedPieces: sql<number>`COALESCE(SUM(${scrapLogs.quantityRejected}), 0)::int`,
+            incidentCount: sql<number>`COUNT(${scrapLogs.id})::int`,
+          })
+          .from(scrapLogs)
+          .innerJoin(stages, eq(scrapLogs.stageId, stages.id))
+          .groupBy(stages.id, stages.name, stages.sequence)
+          .orderBy(asc(stages.sequence)),
+        db
+          .select({
+            partName: sql<string>`trim(${batches.partName})`,
+            totalPieces: sql<number>`COALESCE(SUM(${batches.piecesQuantity}), 0)::int`,
+            batchCount: sql<number>`COUNT(${batches.id})::int`,
+            rawQuantity: sql<number>`COALESCE(SUM(${batches.quantity}), 0)::double precision`,
+          })
+          .from(batches)
+          .where(sql`${batches.partName} IS NOT NULL AND trim(${batches.partName}) <> ''`)
+          .groupBy(sql`trim(${batches.partName})`)
+          .orderBy(
+            desc(sql`COALESCE(SUM(${batches.piecesQuantity}), 0)`),
+            desc(sql`COUNT(${batches.id})`)
+          )
+          .limit(5),
+      ]);
+
+    // Last 30 days daily good pieces produced (from stage transitions beyond Raw Material)
+    const today = new Date();
+    const startWindow = new Date(
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 29)
+    );
+
+    const dailyProdRows = await db
+      .select({
+        dayKey: sql<string>`to_char(${batchStageHistory.movedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`,
+        goodPieces: sql<number>`COALESCE(SUM(${batchStageHistory.qtyOut}), 0)::int`,
+        rejectedPieces: sql<number>`COALESCE(SUM(${batchStageHistory.qtyRejected}), 0)::int`,
+        transitions: sql<number>`COUNT(${batchStageHistory.id})::int`,
+      })
+      .from(batchStageHistory)
+      .innerJoin(stages, eq(batchStageHistory.stageId, stages.id))
+      .where(
+        and(
+          sql`${batchStageHistory.movedAt} >= ${startWindow}`,
+          sql`${stages.sequence} >= 2`,
+          sql`${batchStageHistory.qtyOut} IS NOT NULL AND ${batchStageHistory.qtyOut} > 0`
+        )
+      )
+      .groupBy(sql`to_char(${batchStageHistory.movedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`);
+
+    const dailyProdMap = new Map(dailyProdRows.map((r) => [r.dayKey, r]));
+    const monthNames = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    const productionOverTime: {
+      date: string;
+      label: string;
+      goodPieces: number;
+      rejectedPieces: number;
+      transitions: number;
+    }[] = [];
+
+    for (let i = 0; i < 30; i += 1) {
+      const d = new Date(startWindow.getTime() + i * 86_400_000);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(d.getUTCDate()).padStart(2, '0');
+      const dateKey = `${y}-${m}-${day}`;
+      const label = `${monthNames[d.getUTCMonth()]} ${d.getUTCDate()}`;
+      const row = dailyProdMap.get(dateKey);
+      productionOverTime.push({
+        date: dateKey,
+        label,
+        goodPieces: row?.goodPieces ?? 0,
+        rejectedPieces: row?.rejectedPieces ?? 0,
+        transitions: row?.transitions ?? 0,
+      });
+    }
 
     const unreadRows = await db
       .select({ count: sql<number>`COUNT(*)::int` })
@@ -257,11 +412,25 @@ app.get('/api/dashboard', requireAuth, async (req: AuthRequest, res: Response) =
 
     res.json({
       materials: materialList,
+      parts: partList,
       belowReorderMaterials: materialList.filter((m) => m.isBelowReorder),
+      belowReorderParts: partList.filter((p) => p.isBelowReorder),
       activeStages,
-      stageDistribution,
+      stageDistribution: enrichedStageDistribution,
       recentBatches,
       unreadNotifications: unreadRows[0]?.count ?? 0,
+      executiveSummary: {
+        batchesCreated: batchAggregateRows[0]?.batchesCreated ?? 0,
+        completedBatches: batchAggregateRows[0]?.completedBatches ?? 0,
+        inProcessBatches: batchAggregateRows[0]?.inProcessBatches ?? 0,
+        totalRejectedPieces: scrapTotalRows[0]?.totalRejectedPieces ?? 0,
+        productionOverTime,
+        rejectionsByStage: rejectionsByStageRows.filter((r) => r.rejectedPieces > 0),
+        topCutPartsProduced: topCutPartsRows.map((p) => ({
+          ...p,
+          rawQuantity: Number((p.rawQuantity ?? 0).toFixed(4)),
+        })),
+      },
     });
   } catch (err) {
     handleRouteError(res, err, 'Failed to load dashboard data');
@@ -291,6 +460,17 @@ app.get('/api/materials', requireAuth, async (req: AuthRequest, res: Response) =
     });
   } catch (err) {
     handleRouteError(res, err, 'Failed to load materials');
+  }
+});
+
+app.get('/api/parts', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const includeInactive =
+      req.query.includeInactive === 'true' && req.authUser?.role === 'admin';
+    const list = await getAllPartsWithStock(includeInactive);
+    res.json({ parts: list });
+  } catch (err) {
+    handleRouteError(res, err, 'Failed to load parts master');
   }
 });
 
@@ -329,6 +509,15 @@ app.get(
   }
 );
 
+app.get('/api/part-names', requireAuth, async (_req: AuthRequest, res: Response) => {
+  try {
+    const partNames = await getKnownPartNames();
+    res.json({ partNames });
+  } catch (err) {
+    handleRouteError(res, err, 'Failed to load part names');
+  }
+});
+
 // ============================================================================
 // CORE PRODUCTION WORKFLOW ROUTES
 // ============================================================================
@@ -341,8 +530,18 @@ app.post(
     try {
       const materialId = Number(req.body?.materialId);
       const quantity = Number(req.body?.quantity);
+      const rawUnit = req.body?.unit;
+      const unit =
+        rawUnit !== undefined && rawUnit !== null && String(rawUnit).trim() !== ''
+          ? normalizeReceiveUnit(rawUnit)
+          : undefined;
       const dateStr = String(req.body?.movementDate ?? '');
       const sendToLaserCutting = Boolean(req.body?.sendToLaserCutting);
+      const partName = req.body?.partName ? String(req.body.partName) : undefined;
+      const piecesQuantity =
+        req.body?.piecesQuantity !== undefined && req.body?.piecesQuantity !== ''
+          ? Number(req.body.piecesQuantity)
+          : undefined;
       const note = req.body?.note ? String(req.body.note) : undefined;
 
       if (!Number.isInteger(materialId) || materialId <= 0) {
@@ -350,6 +549,11 @@ app.post(
       }
       if (!Number.isFinite(quantity) || quantity <= 0) {
         return res.status(400).json({ error: 'Quantity must be greater than zero.' });
+      }
+      if (rawUnit !== undefined && rawUnit !== null && String(rawUnit).trim() !== '' && !unit) {
+        return res.status(400).json({
+          error: 'Invalid unit. Allowed units: kg, sheets, pcs, liters, meters, qty.',
+        });
       }
       const movementDate = dateStr ? new Date(dateStr) : new Date();
       if (Number.isNaN(movementDate.getTime())) {
@@ -359,8 +563,11 @@ app.post(
       const outcome = await receiveStock({
         materialId,
         quantity,
+        unit: unit ?? undefined,
         movementDate,
         sendToLaserCutting,
+        partName,
+        piecesQuantity,
         note,
         userId: req.authUser!.id,
       });
@@ -414,38 +621,92 @@ app.post(
   }
 );
 
+app.post(
+  '/api/stock/bulk-update',
+  requireAuth,
+  requireRole(['admin', 'store_keeper']),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+      const rawType = String(req.body?.movementType ?? 'receipt').trim().toLowerCase();
+      const movementType: 'receipt' | 'adjustment' =
+        rawType === 'adjustment' ? 'adjustment' : 'receipt';
+      const dateStr = String(req.body?.movementDate ?? '');
+      const movementDate = dateStr ? new Date(dateStr) : new Date();
+
+      if (rows.length === 0) {
+        return res.status(400).json({ error: 'Please upload at least one row.' });
+      }
+      if (rows.length > 500) {
+        return res.status(400).json({ error: 'Maximum 500 rows per bulk stock upload.' });
+      }
+      if (Number.isNaN(movementDate.getTime())) {
+        return res.status(400).json({ error: 'Invalid movement date.' });
+      }
+
+      const normalizedRows = rows.map((r: Record<string, unknown>, idx: number) => ({
+        rowNumber: Number(r?.rowNumber) || idx + 1,
+        itemCode: String(r?.itemCode ?? '').trim(),
+        productName: r?.productName ? String(r.productName).trim() : undefined,
+        quantity: Number(r?.quantity),
+        unit: r?.unit ? String(r.unit).trim() : undefined,
+      }));
+
+      const outcome = await bulkUpdateStockFromUpload({
+        rows: normalizedRows,
+        movementType,
+        movementDate,
+        userId: req.authUser!.id,
+      });
+
+      res.status(201).json(outcome);
+    } catch (err) {
+      handleRouteError(res, err, 'Failed to process bulk stock update');
+    }
+  }
+);
+
 app.get('/api/batches', requireAuth, async (_req: AuthRequest, res: Response) => {
   try {
-    const batchRows = await db
-      .select({
-        id: batches.id,
-        materialId: batches.materialId,
-        materialCode: materials.code,
-        materialName: materials.name,
-        materialUnit: materials.unit,
-        currentStageId: batches.currentStageId,
-        stageName: stages.name,
-        stageSequence: stages.sequence,
-        quantity: batches.quantity,
-        note: batches.note,
-        createdAt: batches.createdAt,
-        createdBy: batches.createdBy,
-        createdByName: users.name,
-        createdByEmail: users.email,
-      })
-      .from(batches)
-      .innerJoin(materials, eq(batches.materialId, materials.id))
-      .innerJoin(stages, eq(batches.currentStageId, stages.id))
-      .innerJoin(users, eq(batches.createdBy, users.id))
-      .orderBy(desc(batches.createdAt));
+    const [batchRows, activeStages, knownPartNames] = await Promise.all([
+      db
+        .select({
+          id: batches.id,
+          materialId: batches.materialId,
+          materialCode: materials.code,
+          materialName: materials.name,
+          materialUnit: sql<string>`COALESCE(${batches.unit}, ${materials.unit})`,
+          currentStageId: batches.currentStageId,
+          stageName: stages.name,
+          stageSequence: stages.sequence,
+          quantity: batches.quantity,
+          partName: batches.partName,
+          piecesQuantity: batches.piecesQuantity,
+          supplierName: batches.supplierName,
+          invoiceNumber: batches.invoiceNumber,
+          invoiceDate: batches.invoiceDate,
+          bendingInchargeName: batches.bendingInchargeName,
+          machiningInchargeName: batches.machiningInchargeName,
+          note: batches.note,
+          createdAt: batches.createdAt,
+          createdBy: batches.createdBy,
+          createdByName: users.name,
+          createdByEmail: users.email,
+        })
+        .from(batches)
+        .innerJoin(materials, eq(batches.materialId, materials.id))
+        .innerJoin(stages, eq(batches.currentStageId, stages.id))
+        .innerJoin(users, eq(batches.createdBy, users.id))
+        .orderBy(desc(batches.createdAt)),
+      db
+        .select()
+        .from(stages)
+        .where(eq(stages.active, true))
+        .orderBy(asc(stages.sequence), asc(stages.id)),
+      getKnownPartNames(),
+    ]);
 
-    const activeStages = await db
-      .select()
-      .from(stages)
-      .where(eq(stages.active, true))
-      .orderBy(asc(stages.sequence), asc(stages.id));
-
-    res.json({ batches: batchRows, activeStages });
+    res.json({ batches: batchRows, activeStages, knownPartNames });
   } catch (err) {
     handleRouteError(res, err, 'Failed to load batches');
   }
@@ -460,11 +721,18 @@ app.get('/api/batches/:id', requireAuth, async (req: AuthRequest, res: Response)
         materialId: batches.materialId,
         materialCode: materials.code,
         materialName: materials.name,
-        materialUnit: materials.unit,
+        materialUnit: sql<string>`COALESCE(${batches.unit}, ${materials.unit})`,
         currentStageId: batches.currentStageId,
         stageName: stages.name,
         stageSequence: stages.sequence,
         quantity: batches.quantity,
+        partName: batches.partName,
+        piecesQuantity: batches.piecesQuantity,
+        supplierName: batches.supplierName,
+        invoiceNumber: batches.invoiceNumber,
+        invoiceDate: batches.invoiceDate,
+        bendingInchargeName: batches.bendingInchargeName,
+        machiningInchargeName: batches.machiningInchargeName,
         note: batches.note,
         createdAt: batches.createdAt,
         createdBy: batches.createdBy,
@@ -483,39 +751,75 @@ app.get('/api/batches/:id', requireAuth, async (req: AuthRequest, res: Response)
       return res.status(404).json({ error: 'Batch not found.' });
     }
 
-    const history = await db
-      .select({
-        id: batchStageHistory.id,
-        batchId: batchStageHistory.batchId,
-        stageId: batchStageHistory.stageId,
-        stageName: stages.name,
-        stageSequence: stages.sequence,
-        movedAt: batchStageHistory.movedAt,
-        movedBy: batchStageHistory.movedBy,
-        movedByName: users.name,
-        movedByEmail: users.email,
-        note: batchStageHistory.note,
-      })
-      .from(batchStageHistory)
-      .innerJoin(stages, eq(batchStageHistory.stageId, stages.id))
-      .innerJoin(users, eq(batchStageHistory.movedBy, users.id))
-      .where(eq(batchStageHistory.batchId, batchId))
-      .orderBy(asc(batchStageHistory.movedAt), asc(batchStageHistory.id));
-
-    const activeStages = await db
-      .select()
-      .from(stages)
-      .where(eq(stages.active, true))
-      .orderBy(asc(stages.sequence), asc(stages.id));
+    const [history, scrapEntries, activeStages, knownPartNames] = await Promise.all([
+      db
+        .select({
+          id: batchStageHistory.id,
+          batchId: batchStageHistory.batchId,
+          stageId: batchStageHistory.stageId,
+          stageName: stages.name,
+          stageSequence: stages.sequence,
+          qtyIn: batchStageHistory.qtyIn,
+          qtyRejected: batchStageHistory.qtyRejected,
+          qtyOut: batchStageHistory.qtyOut,
+          rejectionReason: batchStageHistory.rejectionReason,
+          movedAt: batchStageHistory.movedAt,
+          movedBy: batchStageHistory.movedBy,
+          movedByName: users.name,
+          movedByEmail: users.email,
+          supplierName: batchStageHistory.supplierName,
+          invoiceNumber: batchStageHistory.invoiceNumber,
+          invoiceDate: batchStageHistory.invoiceDate,
+          inchargeName: batchStageHistory.inchargeName,
+          note: batchStageHistory.note,
+        })
+        .from(batchStageHistory)
+        .innerJoin(stages, eq(batchStageHistory.stageId, stages.id))
+        .innerJoin(users, eq(batchStageHistory.movedBy, users.id))
+        .where(eq(batchStageHistory.batchId, batchId))
+        .orderBy(asc(batchStageHistory.movedAt), asc(batchStageHistory.id)),
+      db
+        .select({
+          id: scrapLogs.id,
+          stageId: scrapLogs.stageId,
+          stageName: stages.name,
+          stageSequence: stages.sequence,
+          partName: scrapLogs.partName,
+          quantityProcessed: scrapLogs.quantityProcessed,
+          quantityRejected: scrapLogs.quantityRejected,
+          quantityGood: scrapLogs.quantityGood,
+          reason: scrapLogs.reason,
+          loggedAt: scrapLogs.loggedAt,
+          loggedByName: users.name,
+        })
+        .from(scrapLogs)
+        .innerJoin(stages, eq(scrapLogs.stageId, stages.id))
+        .innerJoin(users, eq(scrapLogs.loggedBy, users.id))
+        .where(eq(scrapLogs.batchId, batchId))
+        .orderBy(desc(scrapLogs.loggedAt), desc(scrapLogs.id)),
+      db
+        .select()
+        .from(stages)
+        .where(eq(stages.active, true))
+        .orderBy(asc(stages.sequence), asc(stages.id)),
+      getKnownPartNames(),
+    ]);
 
     const nextStage =
       activeStages.find((s) => s.sequence > batch.stageSequence) ?? null;
 
+    const requiresPartAssignment = Boolean(
+      nextStage && activeStages[0] && batch.currentStageId === activeStages[0].id
+    );
+
     res.json({
       batch,
       history,
+      scrapEntries,
       activeStages,
       nextStage,
+      requiresPartAssignment,
+      knownPartNames,
     });
   } catch (err) {
     handleRouteError(res, err, 'Failed to load batch details');
@@ -529,9 +833,55 @@ app.post(
   async (req: AuthRequest, res: Response) => {
     try {
       const batchId = String(req.params.id);
+      const partName = req.body?.partName ? String(req.body.partName) : undefined;
+      const quantityIssued =
+        req.body?.quantityIssued !== undefined && req.body?.quantityIssued !== ''
+          ? Number(req.body.quantityIssued)
+          : undefined;
+      const piecesQuantity =
+        req.body?.piecesQuantity !== undefined && req.body?.piecesQuantity !== ''
+          ? Number(req.body.piecesQuantity)
+          : undefined;
+      const quantityProcessed =
+        req.body?.quantityProcessed !== undefined && req.body?.quantityProcessed !== ''
+          ? Number(req.body.quantityProcessed)
+          : undefined;
+      const quantityRejected =
+        req.body?.quantityRejected !== undefined && req.body?.quantityRejected !== ''
+          ? Number(req.body.quantityRejected)
+          : undefined;
+      const rejectionReason = req.body?.rejectionReason
+        ? String(req.body.rejectionReason)
+        : undefined;
+      const supplierName = req.body?.supplierName
+        ? String(req.body.supplierName)
+        : undefined;
+      const invoiceNumber = req.body?.invoiceNumber
+        ? String(req.body.invoiceNumber)
+        : undefined;
+      const invoiceDate = req.body?.invoiceDate
+        ? String(req.body.invoiceDate)
+        : undefined;
+      const bendingInchargeName = req.body?.bendingInchargeName
+        ? String(req.body.bendingInchargeName)
+        : undefined;
+      const machiningInchargeName = req.body?.machiningInchargeName
+        ? String(req.body.machiningInchargeName)
+        : undefined;
       const note = req.body?.note ? String(req.body.note) : undefined;
       const outcome = await advanceBatch({
         batchId,
+        partName,
+        quantityIssued,
+        piecesQuantity,
+        quantityProcessed,
+        quantityRejected,
+        rejectionReason,
+        supplierName,
+        invoiceNumber,
+        invoiceDate,
+        bendingInchargeName,
+        machiningInchargeName,
         note,
         userId: req.authUser!.id,
       });
@@ -541,6 +891,71 @@ app.post(
     }
   }
 );
+
+app.get('/api/scrap-logs', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const stageIdParam = req.query.stageId ? Number(req.query.stageId) : undefined;
+    const conditions = [];
+    if (stageIdParam && Number.isInteger(stageIdParam)) {
+      conditions.push(eq(scrapLogs.stageId, stageIdParam));
+    }
+
+    const baseLogsQuery = db
+      .select({
+        id: scrapLogs.id,
+        batchId: scrapLogs.batchId,
+        materialId: scrapLogs.materialId,
+        materialCode: materials.code,
+        materialName: materials.name,
+        stageId: scrapLogs.stageId,
+        stageName: stages.name,
+        stageSequence: stages.sequence,
+        partName: scrapLogs.partName,
+        quantityProcessed: scrapLogs.quantityProcessed,
+        quantityRejected: scrapLogs.quantityRejected,
+        quantityGood: scrapLogs.quantityGood,
+        reason: scrapLogs.reason,
+        loggedAt: scrapLogs.loggedAt,
+        loggedByName: users.name,
+        loggedByEmail: users.email,
+      })
+      .from(scrapLogs)
+      .innerJoin(materials, eq(scrapLogs.materialId, materials.id))
+      .innerJoin(stages, eq(scrapLogs.stageId, stages.id))
+      .innerJoin(users, eq(scrapLogs.loggedBy, users.id));
+
+    const [logs, stageSummary, activeStages] = await Promise.all([
+      conditions.length
+        ? baseLogsQuery
+            .where(and(...conditions))
+            .orderBy(desc(scrapLogs.loggedAt), desc(scrapLogs.id))
+        : baseLogsQuery.orderBy(desc(scrapLogs.loggedAt), desc(scrapLogs.id)),
+      db
+        .select({
+          stageId: stages.id,
+          stageName: stages.name,
+          stageSequence: stages.sequence,
+          incidentCount: sql<number>`COUNT(${scrapLogs.id})::int`,
+          totalRejected: sql<number>`COALESCE(SUM(${scrapLogs.quantityRejected}), 0)::int`,
+          totalProcessed: sql<number>`COALESCE(SUM(${scrapLogs.quantityProcessed}), 0)::int`,
+        })
+        .from(stages)
+        .leftJoin(scrapLogs, eq(scrapLogs.stageId, stages.id))
+        .where(eq(stages.active, true))
+        .groupBy(stages.id, stages.name, stages.sequence)
+        .orderBy(asc(stages.sequence)),
+      db
+        .select()
+        .from(stages)
+        .where(eq(stages.active, true))
+        .orderBy(asc(stages.sequence), asc(stages.id)),
+    ]);
+
+    res.json({ logs, stageSummary, activeStages });
+  } catch (err) {
+    handleRouteError(res, err, 'Failed to load scrap and rejection log');
+  }
+});
 
 // ============================================================================
 // REPORTS & EXPORT ROUTES (shared query for UI + CSV + XLSX)
@@ -553,15 +968,22 @@ const VALID_REPORTS: ReportType[] = [
   'stock-adjusted',
   'sent-to-cutting',
   'batch-movement',
+  'scrap-log',
+  'raw-material-movement',
+  'cut-pieces-movement',
 ];
 
 function parseReportFilters(req: Request): ReportFilters {
   const materialIdRaw = req.query.materialId ? Number(req.query.materialId) : undefined;
+  const partIdRaw = req.query.partId ? Number(req.query.partId) : undefined;
+  const partNameRaw = req.query.partName ? String(req.query.partName).trim() : undefined;
   const userIdRaw = req.query.userId ? Number(req.query.userId) : undefined;
   return {
     startDate: req.query.startDate ? String(req.query.startDate) : undefined,
     endDate: req.query.endDate ? String(req.query.endDate) : undefined,
     materialId: materialIdRaw && Number.isInteger(materialIdRaw) ? materialIdRaw : undefined,
+    partId: partIdRaw && Number.isInteger(partIdRaw) ? partIdRaw : undefined,
+    partName: partNameRaw || undefined,
     userId: userIdRaw && Number.isInteger(userIdRaw) ? userIdRaw : undefined,
   };
 }
@@ -829,11 +1251,16 @@ app.post(
     try {
       const code = String(req.body?.code ?? '').trim().toUpperCase();
       const name = String(req.body?.name ?? '').trim();
-      const unit = String(req.body?.unit ?? '').trim();
+      const rawUnit = String(req.body?.unit ?? '').trim();
       const reorderLevel = Number(req.body?.reorderLevel ?? 0);
 
-      if (!code || !name || !unit) {
+      if (!code || !name || !rawUnit) {
         return res.status(400).json({ error: 'Code, name, and unit are required.' });
+      }
+      if (!isValidMaterialUnit(rawUnit)) {
+        return res.status(400).json({
+          error: `Unit must be one of: ${MATERIAL_UNITS.join(', ')}.`,
+        });
       }
       if (!Number.isFinite(reorderLevel) || reorderLevel < 0) {
         return res.status(400).json({ error: 'Reorder level must be zero or greater.' });
@@ -841,7 +1268,7 @@ app.post(
 
       const [created] = await db
         .insert(materials)
-        .values({ code, name, unit, reorderLevel, active: true })
+        .values({ code, name, unit: rawUnit, reorderLevel, active: true })
         .returning();
 
       await db.insert(auditLog).values({
@@ -849,7 +1276,7 @@ app.post(
         action: 'CREATE_MATERIAL',
         entity: 'material',
         entityId: String(created.id),
-        details: JSON.stringify({ code, name, unit, reorderLevel }),
+        details: JSON.stringify({ code, name, unit: rawUnit, reorderLevel }),
       });
 
       res.status(201).json({ material: created });
@@ -858,6 +1285,505 @@ app.post(
         return res.status(409).json({ error: 'Material code already exists.' });
       }
       handleRouteError(res, err, 'Failed to create material');
+    }
+  }
+);
+
+app.post(
+  '/api/settings/materials/bulk-import',
+  requireAuth,
+  requireRole(['admin']),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const inputRows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+      const skipExisting = req.body?.skipExisting !== false;
+
+      if (inputRows.length === 0) {
+        return res.status(400).json({ error: 'No material rows provided for import.' });
+      }
+      if (inputRows.length > 1000) {
+        return res.status(400).json({ error: 'Maximum 1,000 rows per bulk import.' });
+      }
+
+      const validationErrors: string[] = [];
+      const seenCodes = new Set<string>();
+      const prepared: {
+        code: string;
+        name: string;
+        unit: string;
+        reorderLevel: number;
+        qty: number;
+      }[] = [];
+
+      for (let i = 0; i < inputRows.length; i++) {
+        const row = inputRows[i] as Record<string, unknown>;
+        const rowNum = i + 1;
+        const code = String(row?.code ?? '').trim().toUpperCase();
+        const name = String(row?.name ?? '').trim();
+        const normalizedUnit = normalizeMaterialUnit(String(row?.unit ?? ''));
+        const reorderLevel = Number(row?.reorderLevel ?? 0);
+        const qty =
+          row?.qty === undefined || row?.qty === null || row?.qty === ''
+            ? 0
+            : Number(row.qty);
+
+        if (!code) {
+          validationErrors.push(`Row ${rowNum}: Material Code is required.`);
+          continue;
+        }
+        if (!name) {
+          validationErrors.push(`Row ${rowNum} (${code}): Material Name is required.`);
+          continue;
+        }
+        if (!normalizedUnit) {
+          validationErrors.push(
+            `Row ${rowNum} (${code}): Invalid unit "${String(row?.unit ?? '')}". Allowed: ${MATERIAL_UNITS.join(', ')}.`
+          );
+          continue;
+        }
+        if (!Number.isFinite(reorderLevel) || reorderLevel < 0) {
+          validationErrors.push(
+            `Row ${rowNum} (${code}): Reorder Level must be a non-negative number.`
+          );
+          continue;
+        }
+        if (!Number.isFinite(qty) || qty < 0) {
+          validationErrors.push(
+            `Row ${rowNum} (${code}): Qty (Opening Stock) must be a non-negative number.`
+          );
+          continue;
+        }
+        if (seenCodes.has(code)) {
+          validationErrors.push(`Row ${rowNum}: Duplicate Material Code "${code}" in upload.`);
+          continue;
+        }
+
+        seenCodes.add(code);
+        prepared.push({
+          code,
+          name,
+          unit: normalizedUnit,
+          reorderLevel,
+          qty,
+        });
+      }
+
+      if (validationErrors.length > 0) {
+        return res.status(400).json({
+          error: validationErrors.slice(0, 5).join(' '),
+          details: validationErrors,
+        });
+      }
+
+      const existingRows = await db.select({ code: materials.code }).from(materials);
+      const existingCodeSet = new Set(existingRows.map((r) => r.code.toUpperCase()));
+
+      const toInsert = prepared.filter((p) => !existingCodeSet.has(p.code));
+      const skippedCodes = prepared
+        .filter((p) => existingCodeSet.has(p.code))
+        .map((p) => p.code);
+
+      if (!skipExisting && skippedCodes.length > 0) {
+        return res.status(409).json({
+          error: `Material code(s) already exist: ${skippedCodes.slice(0, 5).join(', ')}.`,
+        });
+      }
+
+      if (toInsert.length === 0) {
+        return res.status(200).json({
+          insertedCount: 0,
+          openingStockCount: 0,
+          skippedCodes,
+          materials: [],
+        });
+      }
+
+      const { inserted, openingCount } = await bulkImportMaterialsWithOpeningStock({
+        items: toInsert,
+        skippedCodes,
+        userId: req.authUser!.id,
+      });
+
+      res.status(201).json({
+        insertedCount: inserted.length,
+        openingStockCount: openingCount,
+        skippedCodes,
+        materials: inserted,
+      });
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === '23505') {
+        return res.status(409).json({ error: 'One or more material codes already exist.' });
+      }
+      handleRouteError(res, err, 'Failed to bulk import materials');
+    }
+  }
+);
+
+app.post(
+  '/api/settings/parts',
+  requireAuth,
+  requireRole(['admin']),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const code = String(req.body?.code ?? '').trim().toUpperCase();
+      const name = String(req.body?.name ?? '').trim();
+      const rawUnit = String(req.body?.unit ?? 'qty').trim();
+      const normalizedUnit = normalizeMaterialUnit(rawUnit);
+      const reorderLevel =
+        req.body?.reorderLevel === undefined ||
+        req.body?.reorderLevel === null ||
+        req.body?.reorderLevel === ''
+          ? 0
+          : Number(req.body.reorderLevel);
+      const qty =
+        req.body?.qty === undefined || req.body?.qty === null || req.body?.qty === ''
+          ? 0
+          : Number(req.body.qty);
+
+      if (!code || !name || !rawUnit) {
+        return res.status(400).json({ error: 'Part Code, Part Name, and Unit are required.' });
+      }
+      if (!normalizedUnit) {
+        return res.status(400).json({
+          error: `Unit must be one of: ${MATERIAL_UNITS.join(', ')}.`,
+        });
+      }
+      if (!Number.isFinite(reorderLevel) || reorderLevel < 0) {
+        return res.status(400).json({ error: 'Reorder level must be zero or greater.' });
+      }
+      if (!Number.isFinite(qty) || qty < 0) {
+        return res.status(400).json({ error: 'Opening Qty must be zero or greater.' });
+      }
+
+      const outcome = await db.transaction(async (tx) => {
+        const [part] = await tx
+          .insert(parts)
+          .values({ code, name, unit: normalizedUnit, reorderLevel, active: true })
+          .returning();
+
+        const now = new Date();
+        if (qty > 0) {
+          await tx.insert(partStockMovements).values({
+            partId: part.id,
+            type: 'receipt',
+            quantity: qty,
+            batchId: null,
+            isOpening: true,
+            reason: 'Opening Stock',
+            movementDate: now,
+            createdAt: now,
+            userId: req.authUser!.id,
+            note: 'Initial opening stock on part creation',
+          });
+        }
+
+        let alertResult: Awaited<ReturnType<typeof evaluatePartReorderAlert>> | null = null;
+        if (reorderLevel > 0 && qty <= reorderLevel) {
+          alertResult = await evaluatePartReorderAlert(tx, part.id, req.authUser!.id);
+        }
+
+        await tx.insert(auditLog).values({
+          userId: req.authUser!.id,
+          action: 'CREATE_PART',
+          entity: 'part',
+          entityId: String(part.id),
+          details: JSON.stringify({
+            code,
+            name,
+            unit: normalizedUnit,
+            reorderLevel,
+            openingQty: qty,
+          }),
+        });
+
+        return {
+          part,
+          reorderAlertTriggered: alertResult?.alertTriggered ?? false,
+          emailQueuedForDispatch: alertResult?.emailQueuedForDispatch,
+        };
+      });
+
+      if (outcome.emailQueuedForDispatch) {
+        const emailResult = await sendAlertEmail(
+          outcome.emailQueuedForDispatch.recipients,
+          outcome.emailQueuedForDispatch.subject,
+          outcome.emailQueuedForDispatch.body
+        );
+        if (emailResult.sent) {
+          await db
+            .update(notifications)
+            .set({ emailSent: true })
+            .where(
+              and(
+                eq(notifications.entityType, 'part'),
+                eq(notifications.entityId, String(outcome.part.id)),
+                eq(notifications.type, 'reorder_alert')
+              )
+            );
+        }
+      }
+
+      res.status(201).json({
+        part: outcome.part,
+        reorderAlertTriggered: outcome.reorderAlertTriggered,
+      });
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === '23505') {
+        return res.status(409).json({ error: 'Part code already exists.' });
+      }
+      handleRouteError(res, err, 'Failed to create part');
+    }
+  }
+);
+
+app.post(
+  '/api/settings/parts/bulk-import',
+  requireAuth,
+  requireRole(['admin']),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const inputRows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+      const skipExisting = req.body?.skipExisting !== false;
+
+      if (inputRows.length === 0) {
+        return res.status(400).json({ error: 'No part rows provided for import.' });
+      }
+      if (inputRows.length > 1000) {
+        return res.status(400).json({ error: 'Maximum 1,000 rows per bulk import.' });
+      }
+
+      const validationErrors: string[] = [];
+      const seenCodes = new Set<string>();
+      const prepared: {
+        code: string;
+        name: string;
+        unit: string;
+        reorderLevel: number;
+        qty: number;
+      }[] = [];
+
+      for (let i = 0; i < inputRows.length; i++) {
+        const row = inputRows[i] as Record<string, unknown>;
+        const rowNum = i + 1;
+        const code = String(row?.code ?? '').trim().toUpperCase();
+        const name = String(row?.name ?? '').trim();
+        const normalizedUnit = normalizeMaterialUnit(String(row?.unit ?? 'qty'));
+        const reorderLevel =
+          row?.reorderLevel === undefined ||
+          row?.reorderLevel === null ||
+          row?.reorderLevel === ''
+            ? 0
+            : Number(row.reorderLevel);
+        const qty =
+          row?.qty === undefined || row?.qty === null || row?.qty === ''
+            ? 0
+            : Number(row.qty);
+
+        if (!code) {
+          validationErrors.push(`Row ${rowNum}: Part Code is required.`);
+          continue;
+        }
+        if (!name) {
+          validationErrors.push(`Row ${rowNum} (${code}): Part Name is required.`);
+          continue;
+        }
+        if (!normalizedUnit) {
+          validationErrors.push(
+            `Row ${rowNum} (${code}): Invalid unit "${String(row?.unit ?? '')}". Allowed: ${MATERIAL_UNITS.join(', ')}.`
+          );
+          continue;
+        }
+        if (!Number.isFinite(reorderLevel) || reorderLevel < 0) {
+          validationErrors.push(
+            `Row ${rowNum} (${code}): Reorder Level must be a non-negative number.`
+          );
+          continue;
+        }
+        if (!Number.isFinite(qty) || qty < 0) {
+          validationErrors.push(
+            `Row ${rowNum} (${code}): Qty (Opening Stock) must be a non-negative number.`
+          );
+          continue;
+        }
+        if (seenCodes.has(code)) {
+          validationErrors.push(`Row ${rowNum}: Duplicate Part Code "${code}" in upload.`);
+          continue;
+        }
+
+        seenCodes.add(code);
+        prepared.push({
+          code,
+          name,
+          unit: normalizedUnit,
+          reorderLevel,
+          qty,
+        });
+      }
+
+      if (validationErrors.length > 0) {
+        return res.status(400).json({
+          error: validationErrors.slice(0, 5).join(' '),
+          details: validationErrors,
+        });
+      }
+
+      const existingRows = await db.select({ code: parts.code }).from(parts);
+      const existingCodeSet = new Set(existingRows.map((r) => r.code.toUpperCase()));
+
+      const toInsert = prepared.filter((p) => !existingCodeSet.has(p.code));
+      const skippedCodes = prepared
+        .filter((p) => existingCodeSet.has(p.code))
+        .map((p) => p.code);
+
+      if (!skipExisting && skippedCodes.length > 0) {
+        return res.status(409).json({
+          error: `Part code(s) already exist: ${skippedCodes.slice(0, 5).join(', ')}.`,
+        });
+      }
+
+      if (toInsert.length === 0) {
+        return res.status(200).json({
+          insertedCount: 0,
+          openingStockCount: 0,
+          reorderAlertCount: 0,
+          skippedCodes,
+          parts: [],
+        });
+      }
+
+      const { inserted, openingCount, reorderAlertCount } =
+        await bulkImportPartsWithOpeningStock({
+          items: toInsert,
+          skippedCodes,
+          userId: req.authUser!.id,
+        });
+
+      res.status(201).json({
+        insertedCount: inserted.length,
+        openingStockCount: openingCount,
+        reorderAlertCount,
+        skippedCodes,
+        parts: inserted,
+      });
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === '23505') {
+        return res.status(409).json({ error: 'One or more part codes already exist.' });
+      }
+      handleRouteError(res, err, 'Failed to bulk import parts');
+    }
+  }
+);
+
+app.patch(
+  '/api/settings/parts/:id',
+  requireAuth,
+  requireRole(['admin']),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid part ID.' });
+      }
+
+      const updates: Partial<{
+        code: string;
+        name: string;
+        unit: string;
+        reorderLevel: number;
+        active: boolean;
+      }> = {};
+
+      if (req.body?.code !== undefined) {
+        const code = String(req.body.code).trim().toUpperCase();
+        if (!code) return res.status(400).json({ error: 'Code cannot be empty.' });
+        updates.code = code;
+      }
+      if (req.body?.name !== undefined) {
+        const name = String(req.body.name).trim();
+        if (!name) return res.status(400).json({ error: 'Name cannot be empty.' });
+        updates.name = name;
+      }
+      if (req.body?.unit !== undefined) {
+        const rawUnit = String(req.body.unit).trim();
+        const normalizedUnit = normalizeMaterialUnit(rawUnit);
+        if (!normalizedUnit) {
+          return res.status(400).json({
+            error: `Unit must be one of: ${MATERIAL_UNITS.join(', ')}.`,
+          });
+        }
+        updates.unit = normalizedUnit;
+      }
+      if (req.body?.reorderLevel !== undefined) {
+        const rl = Number(req.body.reorderLevel);
+        if (!Number.isFinite(rl) || rl < 0) {
+          return res.status(400).json({ error: 'Reorder level must be zero or greater.' });
+        }
+        updates.reorderLevel = rl;
+      }
+      if (req.body?.active !== undefined) {
+        updates.active = Boolean(req.body.active);
+      }
+
+      const outcome = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(parts)
+          .set(updates)
+          .where(eq(parts.id, id))
+          .returning();
+
+        if (!updated) {
+          return null;
+        }
+
+        let alertResult: Awaited<ReturnType<typeof evaluatePartReorderAlert>> | null = null;
+        if (updates.reorderLevel !== undefined && updated.active) {
+          alertResult = await evaluatePartReorderAlert(tx, updated.id, req.authUser!.id);
+        }
+
+        await tx.insert(auditLog).values({
+          userId: req.authUser!.id,
+          action: 'UPDATE_PART',
+          entity: 'part',
+          entityId: String(updated.id),
+          details: JSON.stringify(updates),
+        });
+
+        return {
+          updated,
+          emailQueuedForDispatch: alertResult?.emailQueuedForDispatch,
+        };
+      });
+
+      if (!outcome) {
+        return res.status(404).json({ error: 'Part not found.' });
+      }
+
+      if (outcome.emailQueuedForDispatch) {
+        const emailResult = await sendAlertEmail(
+          outcome.emailQueuedForDispatch.recipients,
+          outcome.emailQueuedForDispatch.subject,
+          outcome.emailQueuedForDispatch.body
+        );
+        if (emailResult.sent) {
+          await db
+            .update(notifications)
+            .set({ emailSent: true })
+            .where(
+              and(
+                eq(notifications.entityType, 'part'),
+                eq(notifications.entityId, String(outcome.updated.id)),
+                eq(notifications.type, 'reorder_alert')
+              )
+            );
+        }
+      }
+
+      res.json({ part: outcome.updated });
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === '23505') {
+        return res.status(409).json({ error: 'Part code already exists.' });
+      }
+      handleRouteError(res, err, 'Failed to update part');
     }
   }
 );
@@ -893,7 +1819,11 @@ app.patch(
       }
       if (req.body?.unit !== undefined) {
         const unit = String(req.body.unit).trim();
-        if (!unit) return res.status(400).json({ error: 'Unit cannot be empty.' });
+        if (!isValidMaterialUnit(unit)) {
+          return res.status(400).json({
+            error: `Unit must be one of: ${MATERIAL_UNITS.join(', ')}.`,
+          });
+        }
         updates.unit = unit;
       }
       if (req.body?.reorderLevel !== undefined) {
@@ -930,6 +1860,264 @@ app.patch(
         return res.status(409).json({ error: 'Material code already exists.' });
       }
       handleRouteError(res, err, 'Failed to update material');
+    }
+  }
+);
+
+app.delete(
+  '/api/settings/materials/:id',
+  requireAuth,
+  requireRole(['admin']),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: 'Invalid material ID.' });
+      }
+
+      const existingRows = await db
+        .select()
+        .from(materials)
+        .where(eq(materials.id, id))
+        .limit(1);
+      const target = existingRows[0];
+      if (!target) {
+        return res.status(404).json({ error: 'Material not found.' });
+      }
+
+      const [refs] = await db
+        .select({
+          batchCount: sql<number>`(SELECT count(*)::int FROM batches WHERE material_id = ${id})`,
+          scrapCount: sql<number>`(SELECT count(*)::int FROM scrap_logs WHERE material_id = ${id})`,
+          nonOpeningMovements: sql<number>`(SELECT count(*)::int FROM stock_movements WHERE material_id = ${id} AND (is_opening = false OR batch_id IS NOT NULL))`,
+        })
+        .from(materials)
+        .where(eq(materials.id, id));
+
+      if ((refs?.batchCount ?? 0) > 0) {
+        return res.status(409).json({
+          error: `Cannot delete material "${target.code}" because it is already tied to ${refs.batchCount} batch(es). Deactivate it instead, or clear transactional data first.`,
+        });
+      }
+      if ((refs?.scrapCount ?? 0) > 0) {
+        return res.status(409).json({
+          error: `Cannot delete material "${target.code}" because it has recorded rejection history. Deactivate it instead, or clear transactional data first.`,
+        });
+      }
+      if ((refs?.nonOpeningMovements ?? 0) > 0) {
+        return res.status(409).json({
+          error: `Cannot delete material "${target.code}" because it has recorded stock movements. Deactivate it instead, or clear transactional data first.`,
+        });
+      }
+
+      await db.transaction(async (tx) => {
+        await tx
+          .delete(stockMovements)
+          .where(and(eq(stockMovements.materialId, id), eq(stockMovements.isOpening, true)));
+        await tx
+          .delete(notifications)
+          .where(
+            and(
+              eq(notifications.entityType, 'material'),
+              eq(notifications.entityId, String(id))
+            )
+          );
+        await tx.delete(materials).where(eq(materials.id, id));
+        await tx.insert(auditLog).values({
+          userId: req.authUser!.id,
+          action: 'DELETE_MATERIAL',
+          entity: 'material',
+          entityId: String(id),
+          details: JSON.stringify({ code: target.code, name: target.name }),
+        });
+      });
+
+      res.json({ deletedId: id, code: target.code });
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === '23503') {
+        return res.status(409).json({
+          error:
+            'Cannot delete this material because it is referenced by existing production records.',
+        });
+      }
+      handleRouteError(res, err, 'Failed to delete material');
+    }
+  }
+);
+
+app.delete(
+  '/api/settings/parts/:id',
+  requireAuth,
+  requireRole(['admin']),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: 'Invalid part ID.' });
+      }
+
+      const existingRows = await db
+        .select()
+        .from(parts)
+        .where(eq(parts.id, id))
+        .limit(1);
+      const target = existingRows[0];
+      if (!target) {
+        return res.status(404).json({ error: 'Part not found.' });
+      }
+
+      const normalizedName = target.name.trim().toLowerCase();
+      const [refs] = await db
+        .select({
+          batchCount: sql<number>`(SELECT count(*)::int FROM batches WHERE part_name IS NOT NULL AND lower(trim(part_name)) = ${normalizedName})`,
+          scrapCount: sql<number>`(SELECT count(*)::int FROM scrap_logs WHERE part_name IS NOT NULL AND lower(trim(part_name)) = ${normalizedName})`,
+          nonOpeningMovements: sql<number>`(SELECT count(*)::int FROM part_stock_movements WHERE part_id = ${id} AND (is_opening = false OR batch_id IS NOT NULL))`,
+        })
+        .from(parts)
+        .where(eq(parts.id, id));
+
+      if ((refs?.batchCount ?? 0) > 0) {
+        return res.status(409).json({
+          error: `Cannot delete cut part "${target.code}" because it is already tied to ${refs.batchCount} batch(es). Deactivate it instead, or clear transactional data first.`,
+        });
+      }
+      if ((refs?.scrapCount ?? 0) > 0) {
+        return res.status(409).json({
+          error: `Cannot delete cut part "${target.code}" because it has recorded rejection history. Deactivate it instead, or clear transactional data first.`,
+        });
+      }
+      if ((refs?.nonOpeningMovements ?? 0) > 0) {
+        return res.status(409).json({
+          error: `Cannot delete cut part "${target.code}" because it has recorded stock movements. Deactivate it instead, or clear transactional data first.`,
+        });
+      }
+
+      await db.transaction(async (tx) => {
+        await tx
+          .delete(partStockMovements)
+          .where(and(eq(partStockMovements.partId, id), eq(partStockMovements.isOpening, true)));
+        await tx
+          .delete(notifications)
+          .where(
+            and(eq(notifications.entityType, 'part'), eq(notifications.entityId, String(id)))
+          );
+        await tx.delete(parts).where(eq(parts.id, id));
+        await tx.insert(auditLog).values({
+          userId: req.authUser!.id,
+          action: 'DELETE_PART',
+          entity: 'part',
+          entityId: String(id),
+          details: JSON.stringify({ code: target.code, name: target.name }),
+        });
+      });
+
+      res.json({ deletedId: id, code: target.code });
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === '23503') {
+        return res.status(409).json({
+          error:
+            'Cannot delete this cut part because it is referenced by existing production records.',
+        });
+      }
+      handleRouteError(res, err, 'Failed to delete part');
+    }
+  }
+);
+
+app.get(
+  '/api/settings/danger-zone/summary',
+  requireAuth,
+  requireRole(['admin']),
+  async (_req: AuthRequest, res: Response) => {
+    try {
+      const [
+        batchRows,
+        historyRows,
+        rawMovementRows,
+        partMovementRows,
+        scrapRows,
+        materialRows,
+        partRows,
+        userRows,
+      ] = await Promise.all([
+        db.select({ count: sql<number>`count(*)::int` }).from(batches),
+        db.select({ count: sql<number>`count(*)::int` }).from(batchStageHistory),
+        db.select({ count: sql<number>`count(*)::int` }).from(stockMovements),
+        db.select({ count: sql<number>`count(*)::int` }).from(partStockMovements),
+        db.select({ count: sql<number>`count(*)::int` }).from(scrapLogs),
+        db.select({ count: sql<number>`count(*)::int` }).from(materials),
+        db.select({ count: sql<number>`count(*)::int` }).from(parts),
+        db.select({ count: sql<number>`count(*)::int` }).from(users),
+      ]);
+
+      res.json({
+        transactional: {
+          batches: batchRows[0]?.count ?? 0,
+          batchStageHistory: historyRows[0]?.count ?? 0,
+          stockMovements: rawMovementRows[0]?.count ?? 0,
+          partStockMovements: partMovementRows[0]?.count ?? 0,
+          scrapLogs: scrapRows[0]?.count ?? 0,
+        },
+        preserved: {
+          materials: materialRows[0]?.count ?? 0,
+          parts: partRows[0]?.count ?? 0,
+          users: userRows[0]?.count ?? 0,
+        },
+      });
+    } catch (err) {
+      handleRouteError(res, err, 'Failed to load danger zone summary');
+    }
+  }
+);
+
+app.post(
+  '/api/settings/danger-zone/clear-transactional-data',
+  requireAuth,
+  requireRole(['admin']),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.body?.confirm !== true) {
+        return res.status(400).json({
+          error: 'Explicit confirmation is required before clearing transactional data.',
+        });
+      }
+
+      const cleared = await db.transaction(async (tx) => {
+        // Delete child transactional tables before parent batches table to respect FKs
+        const scrapRes = await tx.delete(scrapLogs);
+        const historyRes = await tx.delete(batchStageHistory);
+        const rawMovRes = await tx.delete(stockMovements);
+        const partMovRes = await tx.delete(partStockMovements);
+        const batchRes = await tx.delete(batches);
+        const notifRes = await tx.delete(notifications);
+
+        // Reset reorder alert throttle flags so future real transactions trigger alerts cleanly
+        await tx.update(materials).set({ reorderAlertSent: false });
+        await tx.update(parts).set({ reorderAlertSent: false });
+
+        const counts = {
+          scrapLogs: scrapRes.rowCount ?? 0,
+          batchStageHistory: historyRes.rowCount ?? 0,
+          stockMovements: rawMovRes.rowCount ?? 0,
+          partStockMovements: partMovRes.rowCount ?? 0,
+          batches: batchRes.rowCount ?? 0,
+          notifications: notifRes.rowCount ?? 0,
+        };
+
+        await tx.insert(auditLog).values({
+          userId: req.authUser!.id,
+          action: 'CLEAR_TRANSACTIONAL_DATA',
+          entity: 'system',
+          entityId: 'transactional_data',
+          details: JSON.stringify(counts),
+        });
+
+        return counts;
+      });
+
+      res.json({ cleared });
+    } catch (err) {
+      handleRouteError(res, err, 'Failed to clear transactional data');
     }
   }
 );
@@ -1006,7 +2194,7 @@ app.post(
         details: JSON.stringify({ email: created.email, role: created.role }),
       });
 
-      res.status(201).json({ user: created });
+      res.status(201).json({ user: { ...created, hasPassword: Boolean(password) } });
     } catch (err: unknown) {
       if (err && typeof err === 'object' && 'code' in err && err.code === '23505') {
         return res.status(409).json({ error: 'A user with this email already exists.' });
@@ -1074,6 +2262,7 @@ app.patch(
           email: users.email,
           role: users.role,
           active: users.active,
+          hasPassword: sql<boolean>`(${users.passwordHash} IS NOT NULL)`,
           createdAt: users.createdAt,
         });
 
@@ -1097,6 +2286,70 @@ app.patch(
       res.json({ user: updated });
     } catch (err) {
       handleRouteError(res, err, 'Failed to update user');
+    }
+  }
+);
+
+app.delete(
+  '/api/settings/users/:id',
+  requireAuth,
+  requireRole(['admin']),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid user ID.' });
+      }
+      if (id === req.authUser!.id) {
+        return res.status(400).json({ error: 'You cannot remove your own active account.' });
+      }
+
+      const existingRows = await db
+        .select({ id: users.id, email: users.email })
+        .from(users)
+        .where(eq(users.id, id))
+        .limit(1);
+      const target = existingRows[0];
+      if (!target) {
+        return res.status(404).json({ error: 'User not found.' });
+      }
+
+      const [refs] = await db
+        .select({
+          movements: sql<number>`(SELECT count(*)::int FROM stock_movements WHERE user_id = ${id})`,
+          batches: sql<number>`(SELECT count(*)::int FROM batches WHERE created_by = ${id})`,
+          history: sql<number>`(SELECT count(*)::int FROM batch_stage_history WHERE moved_by = ${id})`,
+          audits: sql<number>`(SELECT count(*)::int FROM audit_log WHERE user_id = ${id})`,
+        })
+        .from(users)
+        .where(eq(users.id, id));
+
+      if (
+        (refs?.movements ?? 0) > 0 ||
+        (refs?.batches ?? 0) > 0 ||
+        (refs?.history ?? 0) > 0 ||
+        (refs?.audits ?? 0) > 0
+      ) {
+        return res.status(409).json({
+          error:
+            'This user has recorded production or audit history and cannot be deleted. Click Deactivate to revoke their login access immediately.',
+        });
+      }
+
+      await db.delete(notifications).where(eq(notifications.userId, id));
+      await db.delete(users).where(eq(users.id, id));
+
+      await db.insert(auditLog).values({
+        userId: req.authUser!.id,
+        action: 'REMOVE_USER',
+        entity: 'user',
+        entityId: String(id),
+        details: JSON.stringify({ email: target.email }),
+      });
+
+      res.json({ removedId: id });
+    } catch (err) {
+      handleRouteError(res, err, 'Failed to remove user');
     }
   }
 );
@@ -1294,7 +2547,7 @@ async function startServer() {
   }
 
   app.listen(port, '0.0.0.0', () => {
-    console.log(`ForgeFlow server listening on http://0.0.0.0:${port}`);
+    console.log(`Abone Cut Pieces Tracking server listening on http://0.0.0.0:${port}`);
   });
 }
 

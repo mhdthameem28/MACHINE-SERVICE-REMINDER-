@@ -61,41 +61,38 @@ export const requireAuth = async (
       return next();
     }
 
-    // 2. Otherwise verify Firebase ID Token
+    // 2. Otherwise verify Firebase ID Token (Google OAuth)
     const decoded = await adminAuth.verifyIdToken(token);
     const email = (decoded.email ?? '').trim().toLowerCase();
     if (!email) {
       return res.status(401).json({ error: 'Unauthorized: Verified account has no email' });
     }
 
-    // Look up by uid first, then by lowercase email
-    let dbUserRows = await db
+    // Password-only fallback admin account cannot authenticate via Google OAuth
+    if (email === 'admin@protrack.com') {
+      return res.status(403).json({ error: 'Access Denied: Unauthorized Email' });
+    }
+
+    // Look up user strictly by lowercase email in the whitelist table
+    const dbUserRows = await db
       .select()
       .from(users)
-      .where(eq(users.uid, decoded.uid))
+      .where(sql`lower(${users.email}) = ${email}`)
       .limit(1);
-
-    if (!dbUserRows.length) {
-      dbUserRows = await db
-        .select()
-        .from(users)
-        .where(sql`lower(${users.email}) = ${email}`)
-        .limit(1);
-    }
 
     let dbUser = dbUserRows[0];
 
-    // If database has zero users at all, bootstrap the first Google user as admin
+    // If database has zero users at all, only allow bootstrapping the primary owner email
     if (!dbUser) {
       const existingCount = await db
         .select({ count: sql<number>`count(*)::int` })
         .from(users);
-      if ((existingCount[0]?.count ?? 0) === 0) {
+      if ((existingCount[0]?.count ?? 0) === 0 && email === 'mhdthameem28work@gmail.com') {
         const inserted = await db
           .insert(users)
           .values({
             uid: decoded.uid,
-            name: decoded.name || email.split('@')[0],
+            name: decoded.name || 'System Administrator',
             email,
             role: 'admin',
             active: true,
@@ -108,12 +105,15 @@ export const requireAuth = async (
         dbUser = inserted[0];
       } else {
         return res.status(403).json({
-          error:
-            'Your email is not registered in this workspace. Ask an Administrator to add your account in Settings > Users.',
+          error: 'Access Denied: Unauthorized Email',
         });
       }
+    } else if (!dbUser.active) {
+      return res.status(403).json({
+        error: 'Access Denied: Unauthorized Email',
+      });
     } else if (!dbUser.uid) {
-      // Bind Firebase UID to the pre-registered user record
+      // Bind Firebase UID to the whitelisted user record
       const updated = await db
         .update(users)
         .set({
@@ -123,12 +123,6 @@ export const requireAuth = async (
         .where(eq(users.id, dbUser.id))
         .returning();
       dbUser = updated[0];
-    }
-
-    if (!dbUser.active) {
-      return res.status(403).json({
-        error: 'Your account has been deactivated. Contact an Administrator.',
-      });
     }
 
     req.authUser = {

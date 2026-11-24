@@ -82,11 +82,11 @@ export function DataTable<T>({
   };
 
   return (
-    <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+    <div className="bg-white border border-slate-200 rounded-2xl shadow-sm saas-card-hover overflow-hidden">
       {!hideSearch && searchFilter && (
-        <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-4 bg-slate-50/50">
+        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between gap-4 bg-white">
           <div className="relative flex-1 max-w-sm">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={search}
@@ -95,7 +95,7 @@ export function DataTable<T>({
                 setPage(1);
               }}
               placeholder={searchPlaceholder}
-              className="w-full pl-9 pr-3 py-1.5 text-sm bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900/15 focus:border-slate-400"
+              className="w-full pl-10 pr-3.5 py-2 text-sm font-normal bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors"
             />
           </div>
           <div className="text-xs text-slate-500 tabular-nums whitespace-nowrap">
@@ -106,22 +106,25 @@ export function DataTable<T>({
 
       {paginated.length === 0 ? (
         <div className="px-6 py-12 text-center">
-          <p className="text-sm font-medium text-slate-900">{emptyTitle}</p>
+          <p className="text-sm font-semibold text-slate-900">{emptyTitle}</p>
           <p className="text-xs text-slate-500 mt-1">{emptyDescription}</p>
           {emptyAction && <div className="mt-4">{emptyAction}</div>}
         </div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+          <table
+            className="w-full text-left"
+            style={{ borderCollapse: 'collapse' }}
+          >
             <thead>
-              <tr className="border-b border-slate-200 bg-slate-50/70">
+              <tr className="border-b border-slate-200 bg-slate-50 divide-x divide-slate-200">
                 {columns.map((col) => {
                   const isSorted = sortKey === col.key;
                   const canSort = col.sortable !== false;
                   return (
                     <th
                       key={col.key}
-                      className={`px-4 py-2.5 text-xs font-semibold text-slate-600 select-none whitespace-nowrap ${
+                      className={`px-4 py-3 text-xs font-semibold text-slate-600 select-none whitespace-nowrap ${
                         col.numeric ? 'text-right' : 'text-left'
                       }`}
                     >
@@ -136,9 +139,9 @@ export function DataTable<T>({
                           <span>{col.label}</span>
                           {isSorted ? (
                             sortDir === 'asc' ? (
-                              <ArrowUp className="w-3.5 h-3.5 text-slate-900" />
+                              <ArrowUp className="w-3.5 h-3.5 text-indigo-600" />
                             ) : (
-                              <ArrowDown className="w-3.5 h-3.5 text-slate-900" />
+                              <ArrowDown className="w-3.5 h-3.5 text-indigo-600" />
                             )
                           ) : (
                             <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
@@ -152,22 +155,22 @@ export function DataTable<T>({
                 })}
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-200 text-sm">
+            <tbody className="text-sm">
               {paginated.map((row) => {
                 const extraClass = rowClassName ? rowClassName(row) : '';
                 return (
                   <tr
                     key={keyField(row)}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
-                    className={`${
-                      onRowClick ? 'cursor-pointer hover:bg-slate-50' : 'hover:bg-slate-50/60'
+                    className={`border-b border-slate-200 divide-x divide-slate-200 odd:bg-white even:bg-slate-50/50 hover:bg-slate-100/70 ${
+                      onRowClick ? 'cursor-pointer' : ''
                     } transition-colors ${extraClass}`}
                   >
                     {columns.map((col) => (
                       <td
                         key={col.key}
-                        className={`px-4 py-2.5 text-slate-800 ${
-                          col.numeric ? 'text-right font-mono tabular-nums' : 'text-left'
+                        className={`px-4 py-3 text-slate-800 ${
+                          col.numeric ? 'text-right font-mono tabular-nums whitespace-nowrap' : 'text-left'
                         }`}
                       >
                         {col.render
@@ -184,7 +187,7 @@ export function DataTable<T>({
       )}
 
       {totalPages > 1 && (
-        <div className="px-4 py-2.5 border-t border-slate-200 bg-slate-50/50 flex items-center justify-between text-xs text-slate-600">
+        <div className="px-4 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-xs text-slate-600">
           <span className="tabular-nums">
             Page {safePage} of {totalPages}
           </span>
@@ -193,7 +196,7 @@ export function DataTable<T>({
               type="button"
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={safePage <= 1}
-              className="px-2.5 py-1 border border-slate-200 bg-white rounded hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1"
+              className="px-3 py-1.5 border border-slate-300 bg-white text-slate-700 rounded-lg hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1 transition-colors"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
               <span>Prev</span>
@@ -202,7 +205,7 @@ export function DataTable<T>({
               type="button"
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               disabled={safePage >= totalPages}
-              className="px-2.5 py-1 border border-slate-200 bg-white rounded hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1"
+              className="px-3 py-1.5 border border-slate-300 bg-white text-slate-700 rounded-lg hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1 transition-colors"
             >
               <span>Next</span>
               <ChevronRight className="w-3.5 h-3.5" />

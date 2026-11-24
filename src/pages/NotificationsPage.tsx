@@ -76,26 +76,26 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
   const visible = filter === 'unread' ? items.filter((n) => !n.isRead) : items;
 
   if (loading) {
-    return <div className="h-72 bg-white border border-slate-200 rounded-lg animate-pulse" />;
+    return <div className="h-72 bg-white border border-slate-200 rounded-2xl shadow-sm animate-pulse" />;
   }
 
   return (
     <div className="max-w-4xl space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-slate-900">Notifications</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Notifications</h1>
+          <p className="text-sm text-slate-500 mt-1">
             Reorder threshold alerts and batch stage completion updates.
           </p>
         </div>
 
         <div className="flex items-center gap-3">
-          <div className="flex p-1 bg-slate-100 rounded-md">
+          <div className="flex p-1 bg-white border border-slate-200 rounded-xl shadow-sm">
             <button
               type="button"
               onClick={() => setFilter('all')}
-              className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                filter === 'all' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                filter === 'all' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               All ({items.length})
@@ -103,8 +103,8 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
             <button
               type="button"
               onClick={() => setFilter('unread')}
-              className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                filter === 'unread' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                filter === 'unread' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               Unread ({items.filter((n) => !n.isRead).length})
@@ -115,7 +115,7 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
             type="button"
             onClick={markAllRead}
             disabled={items.every((n) => n.isRead)}
-            className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-md hover:bg-slate-50 disabled:opacity-40 inline-flex items-center gap-1.5"
+            className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-40 inline-flex items-center gap-1.5 shadow-sm"
           >
             <CheckCheck className="w-3.5 h-3.5" />
             <span>Mark all read</span>
@@ -124,12 +124,12 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
       </div>
 
       {error && (
-        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
+        <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800">
           {error}
         </div>
       )}
 
-      <div className="bg-white border border-slate-200 rounded-lg divide-y divide-slate-200">
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-sm divide-y divide-slate-200 overflow-hidden">
         {visible.length === 0 ? (
           <div className="px-6 py-12 text-center">
             <Bell className="w-6 h-6 text-slate-400 mx-auto mb-2" />
@@ -144,8 +144,8 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
           visible.map((n) => (
             <div
               key={n.id}
-              className={`p-4 flex items-start justify-between gap-4 ${
-                n.isRead ? 'bg-white' : 'bg-amber-50/30'
+              className={`p-4 flex items-start justify-between gap-4 transition-colors ${
+                n.isRead ? 'bg-transparent hover:bg-slate-50' : 'bg-indigo-50/50 hover:bg-indigo-50/80'
               }`}
             >
               <div className="space-y-1 min-w-0">
@@ -172,7 +172,9 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
                   {!n.isRead && (
                     <>
                       <span aria-hidden="true">·</span>
-                      <span className="font-semibold text-amber-700">Unread</span>
+                      <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-600 text-[11px] font-semibold">
+                        Unread
+                      </span>
                     </>
                   )}
                 </div>
@@ -182,7 +184,7 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
                   <button
                     type="button"
                     onClick={() => onOpenBatch(n.entityId!)}
-                    className="mt-1 text-xs font-medium text-slate-900 underline underline-offset-2"
+                    className="mt-1 text-xs font-medium text-indigo-600 underline underline-offset-2 hover:text-indigo-700"
                   >
                     Inspect {n.entityId}
                   </button>
@@ -193,7 +195,7 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
                 <button
                   type="button"
                   onClick={() => markRead(n.id)}
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded hover:bg-slate-50 inline-flex items-center gap-1 shrink-0"
+                  className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 inline-flex items-center gap-1 shrink-0"
                 >
                   <Check className="w-3.5 h-3.5" />
                   <span>Mark read</span>

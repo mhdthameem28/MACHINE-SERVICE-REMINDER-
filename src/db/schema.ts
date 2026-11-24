@@ -48,6 +48,14 @@ export const batches = pgTable('batches', {
     .references(() => stages.id)
     .notNull(),
   quantity: doublePrecision('quantity').notNull(),
+  unit: text('unit'),
+  partName: text('part_name'),
+  piecesQuantity: integer('pieces_quantity'),
+  supplierName: text('supplier_name'),
+  invoiceNumber: text('invoice_number'),
+  invoiceDate: text('invoice_date'),
+  bendingInchargeName: text('bending_incharge_name'),
+  machiningInchargeName: text('machining_incharge_name'),
   note: text('note'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   createdBy: integer('created_by')
@@ -63,17 +71,77 @@ export const batchStageHistory = pgTable('batch_stage_history', {
   stageId: integer('stage_id')
     .references(() => stages.id)
     .notNull(),
+  qtyIn: doublePrecision('qty_in'),
+  qtyRejected: integer('qty_rejected').notNull().default(0),
+  qtyOut: integer('qty_out'),
+  rejectionReason: text('rejection_reason'),
   movedAt: timestamp('moved_at', { withTimezone: true }).defaultNow().notNull(),
   movedBy: integer('moved_by')
     .references(() => users.id)
     .notNull(),
+  supplierName: text('supplier_name'),
+  invoiceNumber: text('invoice_number'),
+  invoiceDate: text('invoice_date'),
+  inchargeName: text('incharge_name'),
   note: text('note'),
+});
+
+export const scrapLogs = pgTable('scrap_logs', {
+  id: serial('id').primaryKey(),
+  batchId: text('batch_id')
+    .references(() => batches.id)
+    .notNull(),
+  materialId: integer('material_id')
+    .references(() => materials.id)
+    .notNull(),
+  stageId: integer('stage_id')
+    .references(() => stages.id)
+    .notNull(),
+  partName: text('part_name'),
+  quantityProcessed: integer('quantity_processed').notNull(),
+  quantityRejected: integer('quantity_rejected').notNull(),
+  quantityGood: integer('quantity_good').notNull(),
+  reason: text('reason'),
+  loggedBy: integer('logged_by')
+    .references(() => users.id)
+    .notNull(),
+  loggedAt: timestamp('logged_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
 export const stockMovements = pgTable('stock_movements', {
   id: serial('id').primaryKey(),
   materialId: integer('material_id')
     .references(() => materials.id)
+    .notNull(),
+  type: text('type').notNull(), // 'receipt' | 'issue' | 'adjustment'
+  quantity: doublePrecision('quantity').notNull(),
+  unit: text('unit'),
+  batchId: text('batch_id').references(() => batches.id),
+  isOpening: boolean('is_opening').notNull().default(false),
+  reason: text('reason'),
+  movementDate: timestamp('movement_date', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  userId: integer('user_id')
+    .references(() => users.id)
+    .notNull(),
+  note: text('note'),
+});
+
+export const parts = pgTable('parts', {
+  id: serial('id').primaryKey(),
+  code: text('code').notNull().unique(),
+  name: text('name').notNull(),
+  unit: text('unit').notNull().default('qty'),
+  reorderLevel: doublePrecision('reorder_level').notNull().default(0),
+  reorderAlertSent: boolean('reorder_alert_sent').notNull().default(false),
+  active: boolean('active').notNull().default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const partStockMovements = pgTable('part_stock_movements', {
+  id: serial('id').primaryKey(),
+  partId: integer('part_id')
+    .references(() => parts.id)
     .notNull(),
   type: text('type').notNull(), // 'receipt' | 'issue' | 'adjustment'
   quantity: doublePrecision('quantity').notNull(),
@@ -184,6 +252,44 @@ export const stockMovementsRelations = relations(stockMovements, ({ one }) => ({
   }),
   user: one(users, {
     fields: [stockMovements.userId],
+    references: [users.id],
+  }),
+}));
+
+export const partsRelations = relations(parts, ({ many }) => ({
+  movements: many(partStockMovements),
+}));
+
+export const partStockMovementsRelations = relations(partStockMovements, ({ one }) => ({
+  part: one(parts, {
+    fields: [partStockMovements.partId],
+    references: [parts.id],
+  }),
+  batch: one(batches, {
+    fields: [partStockMovements.batchId],
+    references: [batches.id],
+  }),
+  user: one(users, {
+    fields: [partStockMovements.userId],
+    references: [users.id],
+  }),
+}));
+
+export const scrapLogsRelations = relations(scrapLogs, ({ one }) => ({
+  batch: one(batches, {
+    fields: [scrapLogs.batchId],
+    references: [batches.id],
+  }),
+  material: one(materials, {
+    fields: [scrapLogs.materialId],
+    references: [materials.id],
+  }),
+  stage: one(stages, {
+    fields: [scrapLogs.stageId],
+    references: [stages.id],
+  }),
+  user: one(users, {
+    fields: [scrapLogs.loggedBy],
     references: [users.id],
   }),
 }));

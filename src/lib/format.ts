@@ -8,9 +8,20 @@ export function formatNumber(val: number | string | null | undefined, maxDecimal
   });
 }
 
+export function sanitizeDisplayUnit(unit?: string): string {
+  if (!unit) return '';
+  const trimmed = unit.trim();
+  const match = trimmed.match(/^[\d.,\s]+([a-zA-Z]+)$/);
+  if (match && match[1]) {
+    return match[1].toLowerCase();
+  }
+  return trimmed;
+}
+
 export function formatWithUnit(val: number | string | null | undefined, unit?: string): string {
   const numStr = formatNumber(val);
-  return unit ? `${numStr} ${unit}` : numStr;
+  const cleanUnit = sanitizeDisplayUnit(unit);
+  return cleanUnit ? `${numStr} ${cleanUnit}` : numStr;
 }
 
 export function formatDate(input: string | Date | null | undefined): string {

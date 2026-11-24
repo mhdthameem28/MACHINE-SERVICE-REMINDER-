@@ -21,7 +21,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
 
   useEffect(() => {
     let mounted = true;
-    fetch('/api/auth/setup-status')
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 3000);
+    fetch('/api/auth/setup-status', { signal: controller.signal })
       .then((r) => r.json())
       .then((data) => {
         if (!mounted) return;
@@ -32,9 +34,14 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
       })
       .catch(() => {
         // Ignore non-fatal status check failure
+      })
+      .finally(() => {
+        window.clearTimeout(timer);
       });
     return () => {
       mounted = false;
+      window.clearTimeout(timer);
+      controller.abort();
     };
   }, []);
 
@@ -78,23 +85,23 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
   const displayError = error || authError;
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center px-4 py-12">
+    <div className="min-h-screen w-full font-sans bg-[#F8FAFC] flex flex-col justify-center items-center px-4 py-12">
       <div className="w-full max-w-md">
         <div className="mb-8 text-center">
-          <div className="inline-flex items-center justify-center w-11 h-11 rounded-lg bg-slate-900 text-white mb-4">
-            <Factory className="w-5 h-5" />
+          <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-slate-900 text-white mb-4 shadow-md">
+            <Factory className="w-5 h-5 text-indigo-400" />
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-            ForgeFlow Operations
+            Abone Cut Pieces Tracking
           </h1>
           <p className="text-sm text-slate-500 mt-1.5">
             Raw material ledger, batch traceability, and stage control
           </p>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-lg p-6 sm:p-8">
+        <div className="bg-white border border-slate-200 rounded-2xl shadow-md p-6 sm:p-8">
           <div className="mb-6">
-            <h2 className="text-lg font-semibold text-slate-900">
+            <h2 className="text-lg font-bold tracking-tight text-slate-900">
               {setupMode ? 'Set Initial Administrator Password' : 'Sign in to workspace'}
             </h2>
             <p className="text-xs text-slate-500 mt-1">
@@ -105,7 +112,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
           </div>
 
           {displayError && (
-            <div className="mb-5 p-3 rounded-md bg-red-50 border border-red-200 flex items-start gap-2.5 text-xs text-red-800">
+            <div className="mb-5 p-3 rounded-lg bg-red-50 border border-red-200 flex items-start gap-2.5 text-xs text-red-800">
               <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
               <span>{displayError}</span>
             </div>
@@ -114,7 +121,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
           <form onSubmit={handleSubmit} className="space-y-4">
             {setupMode && (
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                <label className="block text-xs font-medium text-slate-600 mb-1.5">
                   Administrator Name
                 </label>
                 <input
@@ -122,17 +129,17 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
                   value={setupName}
                   onChange={(e) => setSetupName(e.target.value)}
                   required
-                  className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900/15 focus:border-slate-400"
+                  className="w-full px-3.5 py-2.5 text-sm font-normal bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors"
                 />
               </div>
             )}
 
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1.5">
+              <label className="block text-xs font-medium text-slate-600 mb-1.5">
                 Email Address
               </label>
               <div className="relative">
-                <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="email"
                   value={email}
@@ -140,17 +147,17 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
                   placeholder="name@company.com"
                   autoComplete="email"
                   required
-                  className="w-full pl-9 pr-3 py-2 text-sm bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900/15 focus:border-slate-400"
+                  className="w-full pl-10 pr-3.5 py-2.5 text-sm font-normal bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1.5">
+              <label className="block text-xs font-medium text-slate-600 mb-1.5">
                 {setupMode ? 'Create Password (min. 8 characters)' : 'Password'}
               </label>
               <div className="relative">
-                <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="password"
                   value={password}
@@ -159,7 +166,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
                   autoComplete={setupMode ? 'new-password' : 'current-password'}
                   required
                   minLength={setupMode ? 8 : 1}
-                  className="w-full pl-9 pr-3 py-2 text-sm bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-900/15 focus:border-slate-400"
+                  className="w-full pl-10 pr-3.5 py-2.5 text-sm font-normal bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors"
                 />
               </div>
             </div>
@@ -167,7 +174,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
             <button
               type="submit"
               disabled={submitting}
-              className="w-full py-2.5 px-4 text-sm font-medium text-white bg-slate-900 rounded-md hover:bg-slate-800 disabled:opacity-50 transition-colors"
+              className="w-full py-2.5 px-4 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors shadow-sm"
             >
               {submitting
                 ? 'Authenticating...'
@@ -187,7 +194,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
             type="button"
             onClick={handleGoogleSignIn}
             disabled={submitting}
-            className="w-full py-2.5 px-4 text-sm font-medium text-slate-800 bg-white border border-slate-200 rounded-md hover:bg-slate-50 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+            className="w-full py-2.5 px-4 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
           >
             <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
               <path
@@ -226,7 +233,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSignedIn }) => {
                     setEmail(defaultAdminEmail);
                   }
                 }}
-                className="font-medium text-slate-900 underline underline-offset-2 hover:text-slate-700"
+                className="font-medium text-indigo-600 underline underline-offset-2 hover:text-indigo-700"
               >
                 {setupMode ? 'Back to Sign In' : 'Claim Admin Password'}
               </button>

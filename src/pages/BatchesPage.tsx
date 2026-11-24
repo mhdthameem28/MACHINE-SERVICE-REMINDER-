@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Layers } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { formatDateTime, formatWithUnit } from '../lib/format';
+import { formatDateTime, formatNumber, formatWithUnit } from '../lib/format';
 import { ColumnDef, DataTable } from '../components/DataTable';
 
 interface BatchRow {
@@ -14,6 +14,8 @@ interface BatchRow {
   stageName: string;
   stageSequence: number;
   quantity: number;
+  partName: string | null;
+  piecesQuantity: number | null;
   note: string | null;
   createdAt: string;
   createdBy: number;
@@ -77,7 +79,7 @@ export const BatchesPage: React.FC<BatchesPageProps> = ({ onOpenBatch }) => {
     },
     {
       key: 'materialName',
-      label: 'Material',
+      label: 'Raw Material',
       render: (r) => (
         <div>
           <span className="font-mono text-xs text-slate-500 mr-1.5">{r.materialCode}</span>
@@ -86,16 +88,39 @@ export const BatchesPage: React.FC<BatchesPageProps> = ({ onOpenBatch }) => {
       ),
     },
     {
+      key: 'partName',
+      label: 'Part Name',
+      sortValue: (r) => r.partName ?? '',
+      render: (r) =>
+        r.partName ? (
+          <span className="font-medium text-slate-900">{r.partName}</span>
+        ) : (
+          <span className="text-xs text-slate-400">—</span>
+        ),
+    },
+    {
       key: 'quantity',
-      label: 'Quantity',
+      label: 'Raw Qty',
       numeric: true,
       render: (r) => formatWithUnit(r.quantity, r.materialUnit),
+    },
+    {
+      key: 'piecesQuantity',
+      label: 'Pieces',
+      numeric: true,
+      sortValue: (r) => r.piecesQuantity ?? 0,
+      render: (r) =>
+        r.piecesQuantity !== null ? (
+          <span className="font-mono text-slate-900">{formatNumber(r.piecesQuantity)} pcs</span>
+        ) : (
+          <span className="text-xs text-slate-400">—</span>
+        ),
     },
     {
       key: 'stageSequence',
       label: 'Current Stage',
       render: (r) => (
-        <span className="inline-flex items-center gap-1.5 text-slate-900 font-medium">
+        <span className="inline-flex items-center gap-1.5 text-slate-900 font-medium whitespace-nowrap">
           <span className="font-mono text-xs text-slate-500">
             {String(r.stageSequence).padStart(2, '0')}
           </span>
@@ -117,7 +142,7 @@ export const BatchesPage: React.FC<BatchesPageProps> = ({ onOpenBatch }) => {
       key: 'createdAt',
       label: 'Created Date',
       render: (r) => (
-        <span className="font-mono text-xs text-slate-600 tabular-nums">
+        <span className="font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap">
           {formatDateTime(r.createdAt)}
         </span>
       ),
@@ -125,12 +150,12 @@ export const BatchesPage: React.FC<BatchesPageProps> = ({ onOpenBatch }) => {
   ];
 
   if (loading) {
-    return <div className="h-96 bg-white border border-slate-200 rounded-lg animate-pulse" />;
+    return <div className="h-96 bg-white border border-slate-200 rounded-2xl shadow-sm animate-pulse" />;
   }
 
   if (error) {
     return (
-      <div className="p-4 bg-white border border-red-200 rounded-lg text-sm text-red-700">
+      <div className="p-4 bg-white border border-red-200 rounded-2xl shadow-sm text-sm text-red-700">
         {error}
       </div>
     );
@@ -140,22 +165,22 @@ export const BatchesPage: React.FC<BatchesPageProps> = ({ onOpenBatch }) => {
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-slate-900">Production Batches</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Select any batch to inspect full stage history or advance it to the next production stage.
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Production Batches</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            Track each batch from raw material receipt through laser cutting, bending, and machining.
           </p>
         </div>
       </div>
 
       {/* Dynamic stage filter tabs driven from stages table */}
-      <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-lg w-fit">
+      <div className="flex flex-wrap items-center gap-1 p-1 bg-white border border-slate-200 rounded-xl shadow-sm w-fit">
         <button
           type="button"
           onClick={() => setStageFilter('all')}
-          className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+          className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
             stageFilter === 'all'
-              ? 'bg-white text-slate-900 shadow-sm'
-              : 'text-slate-600 hover:text-slate-900'
+              ? 'bg-indigo-600 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
           }`}
         >
           All Stages ({batches.length})
@@ -167,10 +192,10 @@ export const BatchesPage: React.FC<BatchesPageProps> = ({ onOpenBatch }) => {
               key={st.id}
               type="button"
               onClick={() => setStageFilter(String(st.id))}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
                 stageFilter === String(st.id)
-                  ? 'bg-white text-slate-900 shadow-sm'
-                  : 'text-slate-600 hover:text-slate-900'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
               }`}
             >
               {String(st.sequence).padStart(2, '0')}. {st.name} ({count})
@@ -183,11 +208,12 @@ export const BatchesPage: React.FC<BatchesPageProps> = ({ onOpenBatch }) => {
         data={filteredBatches}
         columns={columns}
         keyField={(r) => r.id}
-        searchPlaceholder="Search by Batch ID, material code, name, or creator..."
+        searchPlaceholder="Search by Batch ID, raw material, part name, or creator..."
         searchFilter={(r, q) =>
           r.id.toLowerCase().includes(q) ||
           r.materialCode.toLowerCase().includes(q) ||
           r.materialName.toLowerCase().includes(q) ||
+          (r.partName ?? '').toLowerCase().includes(q) ||
           r.createdByName.toLowerCase().includes(q)
         }
         onRowClick={(r) => onOpenBatch(r.id)}
